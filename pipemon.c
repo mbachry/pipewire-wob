@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 
 #include <spa/utils/string.h>
@@ -20,7 +21,7 @@ static bool update_wob(PipeMon *self, double volume, bool is_muted)
 {
     int percent = 0;
     if (!is_muted)
-        percent = (int)(volume * 100.0);
+        percent = (int)(cbrt(volume) * 100.0);
 
     g_autoptr(FILE) fp = fopen(self->wob_path, "w");
     if (!fp) {
