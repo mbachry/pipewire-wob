@@ -2,20 +2,38 @@
 #include <math.h>
 #include <stdio.h>
 
+#include <glib-unix.h>
 #include <spa/utils/string.h>
 #include <wp/wp.h>
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(FILE, fclose)
 
 typedef struct {
+    GMainLoop *loop;
     WpCore *core;
     WpObjectManager *object_manager;
     WpPlugin *mixer_api;
     WpPlugin *default_nodes_api;
-    char *wob_path;
+    pid_t wob_pid;
+    int wob_pipe;
     int pending_plugins;
     int default_sink_id;
 } PipeMon;
+
+static int launch_wob(pid_t *pid)
+{
+    g_autoptr(GError) error = NULL;
+
+    char *argv[] = {"wob", "wob", NULL};
+    int pipefd = -1;
+    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, pid, &pipefd, NULL, NULL,
+                                  &error)) {
+        fprintf(stderr, "failed to launch wob: %s\n", error->message);
+        return -1;
+    }
+
+    return pipefd;
+}
 
 static bool update_wob(PipeMon *self, double volume, bool is_muted)
 {
@@ -23,12 +41,10 @@ static bool update_wob(PipeMon *self, double volume, bool is_muted)
     if (!is_muted)
         percent = (int)(cbrt(volume) * 100.0);
 
-    g_autoptr(FILE) fp = fopen(self->wob_path, "w");
-    if (!fp) {
-        fprintf(stderr, "failed to open wob socket: %m");
-        return false;
-    }
-    if (fprintf(fp, "%u\n", percent) < 0) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%u\n", percent);
+
+    if (write(self->wob_pipe, buf, strlen(buf)) < 0) {
         fprintf(stderr, "failed to write to wob socket: %m");
         return false;
     }
@@ -122,16 +138,22 @@ static void pipe_mon_free(PipeMon *self)
     g_clear_object(&self->core);
     g_clear_object(&self->mixer_api);
     g_clear_object(&self->default_nodes_api);
-    free(self->wob_path);
+    g_main_loop_unref(self->loop);
 }
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(PipeMon, pipe_mon_free)
+
+static int handle_signals(void *user_data)
+{
+    PipeMon *mon = user_data;
+    g_main_loop_quit(mon->loop);
+    return G_SOURCE_CONTINUE;
+}
 
 int main(int argc, gchar **argv)
 {
     g_auto(PipeMon) mon = {0};
 
     mon.default_sink_id = -1;
-    mon.wob_path = g_strdup_printf("/run/user/%u/wob.sock", getuid());
 
     wp_init(WP_INIT_ALL);
 
@@ -151,17 +173,28 @@ int main(int argc, gchar **argv)
 
     if (!wp_core_connect(mon.core)) {
         fprintf(stderr, "Could not connect to PipeWire\n");
-        return 2;
+        return 1;
     }
 
-    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+    mon.wob_pipe = launch_wob(&mon.wob_pid);
+    if (mon.wob_pipe < 0)
+        return 1;
 
-    g_signal_connect_swapped(mon.core, "disconnected", (GCallback)g_main_loop_quit, loop);
+    mon.loop = g_main_loop_new(NULL, FALSE);
+
+    g_signal_connect_swapped(mon.core, "disconnected", (GCallback)g_main_loop_quit, mon.loop);
     g_signal_connect_swapped(mon.object_manager, "installed", (GCallback)initialize_volume_monitor, &mon);
 
     wp_core_install_object_manager(mon.core, mon.object_manager);
 
-    g_main_loop_run(loop);
+    g_unix_signal_add(SIGTERM, handle_signals, &mon);
+    g_unix_signal_add(SIGINT, handle_signals, &mon);
+
+    g_main_loop_run(mon.loop);
+
+    close(mon.wob_pipe);
+    kill(mon.wob_pid, SIGKILL);
+    waitpid(mon.wob_pid, NULL, WNOHANG);
 
     return 0;
 }
