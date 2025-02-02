@@ -58,7 +58,6 @@ static guint32 get_default_sink_id(WpPlugin *def_nodes_api)
 
     guint32 res;
     g_signal_emit_by_name(def_nodes_api, "get-default-node", "Audio/Sink", &res);
-    assert(res > 0 && res < G_MAXUINT32);
 
     return res;
 }
@@ -97,7 +96,7 @@ static void on_volume_changed(void *o, int id, PipeMon *self)
 
 static void on_defaults_changed(void *o, PipeMon *self)
 {
-    int new_id = get_default_sink_id(self->default_nodes_api);
+    guint32 new_id = get_default_sink_id(self->default_nodes_api);
     if (new_id != self->default_sink_id) {
         self->default_sink_id = new_id;
         notify_volume_change(self, new_id);
