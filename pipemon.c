@@ -26,13 +26,20 @@ static int launch_wob(pid_t *pid)
 
     char *argv[] = {"wob", "wob", NULL};
     int pipefd = -1;
-    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, pid, &pipefd, NULL, NULL,
-                                  &error)) {
+    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL, pid,
+                                  &pipefd, NULL, NULL, &error)) {
         fprintf(stderr, "failed to launch wob: %s\n", error->message);
         return -1;
     }
 
     return pipefd;
+}
+
+static void on_wob_exit(pid_t pid, int status, void *user_data)
+{
+    PipeMon *mon = user_data;
+    fprintf(stderr, "wob died, exiting\n");
+    g_main_loop_quit(mon->loop);
 }
 
 static bool update_wob(PipeMon *self, double volume, bool is_muted)
@@ -180,6 +187,8 @@ int main(int argc, gchar **argv)
         return 1;
 
     mon.loop = g_main_loop_new(NULL, FALSE);
+
+    g_child_watch_add(mon.wob_pid, on_wob_exit, &mon);
 
     g_signal_connect_swapped(mon.core, "disconnected", (GCallback)g_main_loop_quit, mon.loop);
     g_signal_connect_swapped(mon.object_manager, "installed", (GCallback)initialize_volume_monitor, &mon);
